@@ -229,13 +229,11 @@ app = Flask(__name__)
 def home():
     return "Bot is running"
 
-def run_bot():
-    asyncio.run(main())
-
-if __name__ == "__main__":
-    # Запускаем бота в фоне
-    threading.Thread(target=run_bot, daemon=True).start()
-    
-    # Запускаем Flask для Render (чтобы он видел порт)
+def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    # Запускаем Flask в фоне (для Render), а бота — в главном потоке
+    threading.Thread(target=run_flask, daemon=True).start()
+    asyncio.run(main())
