@@ -2,7 +2,4 @@ aiogram>=3.13.0
 python-dotenv
 Pillow
 aiohttp
-moviepy==1.0.3
-imageio
-imageio-ffmpeg
-numpy
+flask
