@@ -1,29 +1,23 @@
-from aiogram.client.default import DefaultBotProperties
 import os
 import random
 import asyncio
 import io
-import tempfile
 from collections import defaultdict
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 from PIL import Image, ImageDraw, ImageFont
-import aiohttp
-
-MOVIEPY_OK = True
-try:
-    from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip
-except Exception as e:
-    MOVIEPY_OK = False
-    print(f"⚠️ moviepy не загрузился: {e} — /video будет недоступен")
+from flask import Flask
+import threading
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# Исправлено для новой версии aiogram
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
@@ -98,7 +92,7 @@ def drunkify_text(text):
     return text
 
 # ==========================================
-# 3. ГЕНЕРАТОР АБСУРДА (С МАТОМ И БДСМ)
+# 3. ГЕНЕРАТОР АБСУРДА
 # ==========================================
 START_GEN = ["я вчера", "я сегодня", "я однажды", "я тут подумал", "мне сказали", "я слышал", "я видел", "мне приснилось", "я не помню как", "я случайно", "бля, я", "ик, я", "короче, я", "слушай, я", "а вот я", "я нахуй", "я бля", "я ебать"]
 MIDDLE_GEN = ["взял", "отшлепал", "обнял", "потерял", "съел", "сжёг", "уронил", "выпил", "украл", "покрасил", "запустил", "купил", "продал", "забыл", "сломал", "привязал", "поцеловал", "ударил", "нарядил", "нарисовал", "выебал", "отпиздил", "выебал в жопу", "отхлестал плетью", "связал скотчем", "засунул в рот кляп"]
@@ -109,7 +103,7 @@ def generate_absurd():
     return f"{random.choice(START_GEN)} {random.choice(MIDDLE_GEN)} {random.choice(OBJECT_GEN)} {random.choice(END_GEN)}"
 
 # ==========================================
-# 4. СПЕЦИАЛЬНЫЕ ФРАЗЫ (ОСОБЫЕ СЛУЧАИ)
+# 4. СПЕЦИАЛЬНЫЕ ФРАЗЫ
 # ==========================================
 SPECIAL_PHRASES = [
     "АААААА", "АААА БЛЯ", "ЫЫЫЫЫ", "ЕБАТЬ КОЛОТИТЬ", "ПИЗДЕЦ", "АААА ШАПКА", "ПРОПЕЛЛЕР ГУДИТ", "БЛЯЯЯ", "ЧТО", "а?", "ХАХАХАХАХА", "ХЕХЕХЕ", "УУУУУ", "ОООО", "БЛЯ БЛЯ БЛЯ", "ЕБАТЬ", "СУКА", "НАХУЙ", "ЗАЕБАЛ", "ОХУЕТЬ", "ПОМОГИТЕ", "СПАСИТЕ", "КАРАУЛ",
@@ -120,7 +114,7 @@ SPECIAL_PHRASES = [
 ]
 
 # ==========================================
-# 5. МЕМЫ И ВИДЕО
+# 5. МЕМЫ (БЕЗ ВИДЕО)
 # ==========================================
 def _get_font(size):
     for path in ("arial.ttf", "DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
@@ -144,81 +138,6 @@ def make_meme(image_bytes, top_text, bottom_text):
     out.seek(0)
     return out.read()
 
-def _make_overlay_png(width, height, top, bottom, path):
-    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    font = _get_font(36)
-    def draw_outlined(text, xy, anchor):
-        for dx in (-3, 0, 3):
-            for dy in (-3, 0, 3): d.text((xy[0]+dx, xy[1]+dy), text, font=font, fill=(0, 0, 0, 255), anchor=anchor)
-        d.text(xy, text, font=font, fill=(255, 255, 255, 255), anchor=anchor)
-    draw_outlined(top.upper()[:40], (width // 2, 15), "mt")
-    draw_outlined(bottom.upper()[:40], (width // 2, height - 15), "mb")
-    img.save(path)
-
-def make_video_from_video(video_bytes, top_text, bottom_text, max_seconds=8.0):
-    if not MOVIEPY_OK: raise RuntimeError("moviepy не установлен")
-    tmp_dir = tempfile.mkdtemp(prefix="vitalya_vid_")
-    in_path = os.path.join(tmp_dir, "in.mp4")
-    out_path = os.path.join(tmp_dir, "out.mp4")
-    with open(in_path, "wb") as f: f.write(video_bytes)
-    clip = None
-    try:
-        clip = VideoFileClip(in_path)
-        if clip.duration > max_seconds: clip = clip.subclip(0, max_seconds)
-        w, h = clip.size
-        if w % 2: w -= 1
-        if h % 2: h -= 1
-        clip = clip.resize((w, h))
-        overlay_path = os.path.join(tmp_dir, "overlay.png")
-        _make_overlay_png(w, h, top_text, bottom_text, overlay_path)
-        overlay = ImageClip(overlay_path).set_duration(clip.duration)
-        final = CompositeVideoClip([clip, overlay], size=(w, h))
-        final.write_videofile(out_path, codec="libx264", audio=False, preset="ultrafast", threads=2, logger=None, ffmpeg_params=["-pix_fmt", "yuv420p"])
-        with open(out_path, "rb") as f: data = f.read()
-    finally:
-        try:
-            if clip: clip.close()
-        except: pass
-        for p in (in_path, out_path, os.path.join(tmp_dir, "overlay.png")):
-            try: os.remove(p)
-            except: pass
-        try: os.rmdir(tmp_dir)
-        except: pass
-    return data
-
-def make_video_from_photo(image_bytes, top_text, bottom_text, duration=4.0):
-    if not MOVIEPY_OK: raise RuntimeError("moviepy не установлен")
-    tmp_dir = tempfile.mkdtemp(prefix="vitalya_p2v_")
-    img_path = os.path.join(tmp_dir, "frame.png")
-    out_path = os.path.join(tmp_dir, "out.mp4")
-    base = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    w = 720
-    h = int(base.height * (w / base.width))
-    if h % 2: h += 1
-    base = base.resize((w, h))
-    base.save(img_path)
-    clip = None
-    try:
-        clip = ImageClip(img_path).set_duration(duration)
-        clip = clip.resize(lambda t: 1.0 + 0.15 * (t / duration))
-        overlay_path = os.path.join(tmp_dir, "overlay.png")
-        _make_overlay_png(w, h, top_text, bottom_text, overlay_path)
-        overlay = ImageClip(overlay_path).set_duration(duration)
-        final = CompositeVideoClip([clip, overlay], size=(w, h)).set_fps(24)
-        final.write_videofile(out_path, codec="libx264", audio=False, preset="ultrafast", threads=2, logger=None, ffmpeg_params=["-pix_fmt", "yuv420p"])
-        with open(out_path, "rb") as f: data = f.read()
-    finally:
-        try:
-            if clip: clip.close()
-        except: pass
-        for p in (img_path, out_path, os.path.join(tmp_dir, "overlay.png")):
-            try: os.remove(p)
-            except: pass
-        try: os.rmdir(tmp_dir)
-        except: pass
-    return data
-
 async def _download_file(file_id):
     file = await bot.get_file(file_id)
     downloaded = await bot.download_file(file.file_path)
@@ -232,14 +151,11 @@ def _meme_texts():
 # ==========================================
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
-    vstat = "есть" if MOVIEPY_OK else "НЕТ (moviepy не установлен)"
     await msg.answer(
         f"{EMOJI_HAT} <b>ААААА ПРИВЕТ!!! Я ВИТАЛЯ БОБОШ!!!</b>\n\n"
         f"Я пьяный. Отвечаю абсурдной хуйнёй. И делаю роллы с эмбер и лизой.\n"
-        f"Напиши: 'отшлепал эмбер' или 'обнял лизу'.\n"
-        f"Видео-мемы: <b>{vstat}</b>\n\n"
+        f"Напиши: 'отшлепал эмбер' или 'обнял лизу'.\n\n"
         f"/meme — мем из фото\n"
-        f"/video — видео-мем\n"
         f"/owner — хозяин"
     )
 
@@ -273,47 +189,6 @@ async def meme_cmd(msg: Message):
     except Exception as e:
         await msg.answer(f"Виталя сломал мем: {str(e)[:100]}.")
 
-@dp.message(Command("video"))
-async def video_cmd(msg: Message):
-    if not MOVIEPY_OK:
-        await msg.answer("❌ Видео сломано (moviepy не установлен).")
-        return
-    await msg.answer("Виталя делает ВИДЕО... подожди...")
-    
-    if msg.reply_to_message and msg.reply_to_message.video:
-        try:
-            vb = await _download_file(msg.reply_to_message.video.file_id)
-            top, bottom = _meme_texts()
-            loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, make_video_from_video, vb, top, bottom, 8.0)
-            await msg.reply_video(BufferedInputFile(data, filename="video.mp4"), caption=drunkify_text("Виталя сделал видео. ХАХА"))
-            return
-        except Exception as e:
-            await msg.answer(f"Виталя не смог: {str(e)[:150]}")
-    
-    image_bytes = None
-    if msg.reply_to_message and msg.reply_to_message.photo:
-        try: image_bytes = await _download_file(msg.reply_to_message.photo[-1].file_id)
-        except: pass
-    elif msg.photo:
-        try: image_bytes = await _download_file(msg.photo[-1].file_id)
-        except: pass
-        
-    if not image_bytes and media_history[msg.chat.id]:
-        try: image_bytes = await _download_file(random.choice(media_history[msg.chat.id]))
-        except: pass
-    
-    if not image_bytes:
-        await msg.answer("Виталя не видит ни видео, ни фото. ик.")
-        return
-    try:
-        top, bottom = _meme_texts()
-        loop = asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, make_video_from_photo, image_bytes, top, bottom, 4.0)
-        await msg.reply_video(BufferedInputFile(data, filename="video.mp4"), caption=drunkify_text("Виталя сделал видео из фото. ХАХА"))
-    except Exception as e:
-        await msg.answer(f"Виталя не смог видео: {str(e)[:150]}.")
-
 @dp.message(F.photo)
 async def catch_photo(msg: Message):
     try: media_history[msg.chat.id].append(msg.photo[-1].file_id)
@@ -341,9 +216,26 @@ async def handler(msg: Message):
         
     await msg.reply(drunkify_text(reply))
 
+# ==========================================
+# 7. ЗАПУСК (FLASK + BOT)
+# ==========================================
 async def main():
     print(f"🤖 {NAME} (ГЕНЕРАТОР БРЕДА + РОЛЛЫ) запускается...")
     await dp.start_polling(bot)
 
-if __name__ == "__main__":
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running"
+
+def run_bot():
     asyncio.run(main())
+
+if __name__ == "__main__":
+    # Запускаем бота в фоне
+    threading.Thread(target=run_bot, daemon=True).start()
+    
+    # Запускаем Flask для Render (чтобы он видел порт)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
