@@ -6,125 +6,119 @@ from collections import defaultdict
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BufferedInputFile
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramBadRequest
 from PIL import Image, ImageDraw, ImageFont
-from flask import Flask
-import threading
+import httpx
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-# Исправлено для новой версии aiogram
+if not BOT_TOKEN:
+    raise ValueError("❌ В Environment Variables не найден BOT_TOKEN!")
+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-NAME = "Виталя Бобош"
-EMOJI_HAT = "🧢🛸💥"
+chat_settings = defaultdict(lambda: {"active": True})
+chat_history = defaultdict(list)
 
-counter = defaultdict(int)
-media_history = defaultdict(list)
+NAMES = ["@vitalya_bobosh67bot", "виталя", "виталик", "виталий", "виталямбус", "виталечка", "виталясик", "виталюша"]
+
+def is_mentioned(text: str, msg: Message) -> bool:
+    text_lower = text.lower()
+    if any(name in text_lower for name in NAMES):
+        return True
+    if msg.reply_to_message and msg.reply_to_message.from_user.id == bot.id:
+        return True
+    return False
 
 # ==========================================
-# 1. СИСТЕМА РОЛЛОВ (ЭМБЕР И ЛИЗА)
+# СИСТЕМА РОЛЛОВ
 # ==========================================
-ACTION_VERBS = ["отшлепал", "обнял", "поцеловал", "ударил", "дал", "связал", "укусил", "уронил", "облил", "кинул", "пнул", "погладил", "ущипнул", "нарядил", "станцевал", "спел", "подарил", "нарисовал", "трогал", "лизал", "кусал", "бил", "шлепнул", "пощекотал", "поймал", "схватил"]
-EMBER_REACTIONS = ["Эмбер: АААА! Виталя, ты чё делаешь?!", "Эмбер: Ой! Больно же!", "Эмбер: Виталя, бля, прекрати!", "Эмбер: *краснеет* Не надо!", "Эмбер: *смеётся* Ты чего?!", "Эмбер: *уворачивается* Не трогай меня!", "Эмбер: *обиделась* Всё, я с тобой не разговариваю.", "Эмбер: *визжит* ААААА!", "Эмбер: *толкает Виталю* Отстань!", "Эмбер: *смеётся* Ты пьяный?"]
-LIZA_REACTIONS = ["Лиза: *зевает* Виталя, не сейчас.", "Лиза: *закрывает книгу* Ты серьёзно?", "Лиза: *улыбается* Ну ты и дурак.", "Лиза: *отмахивается* Иди проспись.", "Лиза: *смотрит с укором* Виталя...", "Лиза: *смеётся* Ты как всегда.", "Лиза: *гладит по голове* Ладно, ладно.", "Лиза: *вздыхает* Ну что с тобой делать.", "Лиза: *отворачивается* Не мешай читать.", "Лиза: *тихо смеётся* Дурачок."]
+CHARACTERS = {
+    "эмбер": {"names": ["эмбер", "amber"], "reactions": ["Эмбер: АААА! Виталя, ты чё делаешь?!", "Эмбер: Ой! Больно же!", "Эмбер: *краснеет* Не надо!"]},
+    "лиза": {"names": ["лиза", "liza"], "reactions": ["Лиза: *зевает* Виталя, не сейчас.", "Лиза: *закрывает книгу* Ты серьёзно?", "Лиза: *улыбается* Ну ты и дурак."]},
+    "ронова": {"names": ["ронова", "ronova"], "reactions": ["Ронова: *смотрит с презрением* Ты кто вообще?", "Ронова: *бьёт Виталю* Знай своё место."]},
+    "варка": {"names": ["варка", "varka"], "reactions": ["Варка: *смотрит с недоумением* Что ты делаешь?", "Варка: *вздыхает* Виталя, уйди."]},
+    "гренни": {"names": ["гренни", "бабка", "granny"], "reactions": ["Бабка Гренни: *бьёт Виталю сковородкой* Ах ты ж! Охламон!", "Бабка Гренни: *даёт леща* Наглец!"]}
+}
 
-def roll_action(text: str) -> str | None:
+def get_roll_reply(text: str) -> str | None:
     lower = text.lower()
-    has_ember = "эмбер" in lower
-    has_liza = "лиза" in lower
-    if not has_ember and not has_liza: return None
-    
-    verb_found = any(verb in lower for verb in ACTION_VERBS)
-    if verb_found:
-        if has_ember and has_liza: reaction = "Эмбер и Лиза: *смотрят на Виталю с недоумением* Ты чего?"
-        elif has_ember: reaction = random.choice(EMBER_REACTIONS)
-        else: reaction = random.choice(LIZA_REACTIONS)
-        if random.random() < 0.4: reaction += " " + random.choice(["ХАХА", "ик", "бля", "шапка крутится", "сисяндры моисяндры"])
-        return reaction
-    
-    if random.random() < 0.4:
-        if has_ember: return f"Виталя смотрит на эмбер. {random.choice(['ХАХА', 'ик', 'она красивая'])}"
-        if has_liza: return f"Виталя смотрит на лизу. {random.choice(['ХАХА', 'ик', 'она читает'])}"
-    return None
+    found = [data for data in CHARACTERS.values() if any(n in lower for n in data["names"])]
+    if not found: return None
+    reply = " ".join(random.choice(c["reactions"]) for c in found)
+    if random.random() < 0.5: reply += " " + random.choice(["ХАХА", "ик", "бля"])
+    return reply
 
 # ==========================================
-# 2. ПЬЯНЫЕ ТРАНСФОРМАЦИИ
+# ПЬЯНЫЙ ФИЛЬТР И ГЕНЕРАТОР
 # ==========================================
-DRUNK_PREFIX = ["", "", "", "ик ", "ик-ик ", "ааа ", "бля ", "ну ", "вот ", "ооо ", "слушай ", "эээ ", "короче ", "значит ", "так ", "ага ", "ой ", "чё ", "мда ", "хм ", "пфф ", "тьфу ", "ой бля "]
-DRUNK_SUFFIX = ["", "", "", " ик", " ик-ик", " ааа", " бля", " ну", " вот", " ооо", " ...", "..", ".", " ну ты понял", " как-то так", " вот так вот", " я так думаю", " наверное", " хз", " хз бля", " короче", " всё", " я устал", " налей ещё", " аааа", " бля", " чё-то я"]
-DRUNK_INTERJECTIONS = ["ик", "ик-ик", "ик-ик-ик", "ааа", "бля", "ну", "вот", "ооо", "слушай", "эээ", "короче", "значит", "так", "ага", "ой", "хм", "пфф", "тьфу", "мда", "ой бля", "господи", "боже", "ёпта"]
-
 def drunkify_text(text):
     if not text: return text
-    if random.random() < 0.6:
-        prefix = random.choice(DRUNK_PREFIX)
-        if prefix:
-            text = prefix + text
-            if random.random() < 0.5: text = prefix.rstrip() + ", " + text[len(prefix):]
-    if random.random() < 0.5: text = text.rstrip(".!?") + random.choice(DRUNK_SUFFIX)
-    words = text.split(" ")
-    out = []
-    for w in words:
-        if len(w) > 3 and random.random() < 0.3:
-            idx = random.randint(1, len(w) - 1)
-            w = w[:idx] + w[idx-1] * random.randint(2, 4) + w[idx:]
-        if len(w) > 3 and random.random() < 0.2:
-            op = random.choice(["swap", "drop", "dupe", "shift"])
-            idx = random.randint(1, len(w) - 2)
-            if op == "swap": w = w[:idx] + w[idx+1] + w[idx] + w[idx+2:]
-            elif op == "drop": w = w[:idx] + w[idx+1:]
-            elif op == "dupe": w = w[:idx] + w[idx] * 2 + w[idx:]
-            elif op == "shift": w = w[:idx] + random.choice("йцукенгшщзхъфывапролджэячсмитьбю") + w[idx+1:]
-        out.append(w)
-    text = " ".join(out)
-    if random.random() < 0.25:
-        words = text.split(" ")
-        if len(words) > 3:
-            idx = random.randint(1, len(words) - 1)
-            words.insert(idx, random.choice(DRUNK_INTERJECTIONS))
-            text = " ".join(words)
+    prefixes = ["", "", "ик ", "АААА ", "бля ", "ну "]
+    suffixes = ["", "", " ик", " ааа", " бля", " ...", ".."]
+    if random.random() < 0.7: text = random.choice(prefixes) + text
+    if random.random() < 0.6: text = text.rstrip(".!?") + random.choice(suffixes)
     return text
 
-# ==========================================
-# 3. ГЕНЕРАТОР АБСУРДА
-# ==========================================
-START_GEN = ["я вчера", "я сегодня", "я однажды", "я тут подумал", "мне сказали", "я слышал", "я видел", "мне приснилось", "я не помню как", "я случайно", "бля, я", "ик, я", "короче, я", "слушай, я", "а вот я", "я нахуй", "я бля", "я ебать"]
-MIDDLE_GEN = ["взял", "отшлепал", "обнял", "потерял", "съел", "сжёг", "уронил", "выпил", "украл", "покрасил", "запустил", "купил", "продал", "забыл", "сломал", "привязал", "поцеловал", "ударил", "нарядил", "нарисовал", "выебал", "отпиздил", "выебал в жопу", "отхлестал плетью", "связал скотчем", "засунул в рот кляп"]
-OBJECT_GEN = ["летающую корову", "носки", "свой пропеллер", "шапку", "холодильник", "стену", "кота", "соседа", "луну", "динозавра", "бабушку", "Freshtunes", "свою тень", "табуретку", "будильник", "воздух", "ложку", "лужу", "облако", "свои мысли", "хуй", "жопу", "пизду", "шлюху", "свою руку", "ремень", "наручники", "член"]
-END_GEN = ["и это было странно", "и мне понравилось", "но потом передумал", "и теперь я в шоке", "а он не понял", "и всё исчезло", "но мне было похуй", "и я засмеялся", "и это было больно", "и я забыл", "а оно убежало", "и теперь я пьяный", "ХАХА", "и я не жалею", "и мне стыдно", "но я всё равно сделал", "и мне хуёво", "и я в ахуе", "и это пиздец"]
+START_GEN = ["я вчера", "я сегодня", "я однажды", "я тут подумал", "мне сказали", "я слышал", "я видел", "мне приснилось", "я не помню как", "я случайно", "бля, я", "ик, я"]
+MIDDLE_GEN = ["взял", "отшлепал", "обнял", "потерял", "съел", "сжёг", "уронил", "выпил", "украл", "покрасил", "запустил", "купил", "продал", "забыл", "сломал", "привязал", "поцеловал", "ударил", "нарядил", "нарисовал"]
+OBJECT_GEN = ["летающую корову", "носки", "свой пропеллер", "шапку", "холодильник", "стену", "кота", "соседа", "луну", "динозавра", "бабушку", "Freshtunes", "свою тень", "табуретку", "будильник", "воздух", "ложку", "лужу"]
+END_GEN = ["и это было странно", "и мне понравилось", "но потом передумал", "и теперь я в шоке", "а он не понял", "и всё исчезло", "но мне было похуй", "и я засмеялся", "и это было больно", "и я забыл", "ХАХА"]
 
 def generate_absurd():
     return f"{random.choice(START_GEN)} {random.choice(MIDDLE_GEN)} {random.choice(OBJECT_GEN)} {random.choice(END_GEN)}"
 
 # ==========================================
-# 4. СПЕЦИАЛЬНЫЕ ФРАЗЫ
+# ИИ (ЧЕРЕЗ HTTPX)
 # ==========================================
-SPECIAL_PHRASES = [
-    "АААААА", "АААА БЛЯ", "ЫЫЫЫЫ", "ЕБАТЬ КОЛОТИТЬ", "ПИЗДЕЦ", "АААА ШАПКА", "ПРОПЕЛЛЕР ГУДИТ", "БЛЯЯЯ", "ЧТО", "а?", "ХАХАХАХАХА", "ХЕХЕХЕ", "УУУУУ", "ОООО", "БЛЯ БЛЯ БЛЯ", "ЕБАТЬ", "СУКА", "НАХУЙ", "ЗАЕБАЛ", "ОХУЕТЬ", "ПОМОГИТЕ", "СПАСИТЕ", "КАРАУЛ",
-    "сисяндры моисяндры", "У тебя спина красивая", "шапка крутится шапка крутится", "ПРОПЕЛЛЕР. ПРОПЕЛЛЕР", "пропеллер в голову стукнул. ХАХА", "у меня шапка с пропеллером. а у тебя нет. лох", "я надел шапку. пропеллер закрутился. я полетел. не полетел", "без шапки я никто. с шапкой я Виталя",
-    "у меня хомяк умер. я его похоронил. потом выкопал. потом опять похоронил. ХАХА", "я однажды уронил кота с балкона. он не мяукнул. я подумал что он сильный. он не сильный", "у соседа инфаркт был. я подумал что он просто лежит. а он не просто. ХАХА", "смерть это как сон. только без будильника. ХАХА", "я в детстве котёнка в стиралку засунул. он выжил. жалко. ХАХАХА",
-    "я вчера верёвку нашёл. теперь я умею вязать. а ты? ХАХА", "мне нравится когда больно. но не сильно. и не мне. ХАХАХА", "у меня есть кожаный ремень. я им не бью. но могу. если попросишь", "а ты знал что кляп это просто носки? я так делаю", "а можно я тебя свяжу? нет? ладно. Виталя просто спросил. ХАХА",
-    "я загрузил трек на Freshtunes. он исчез. поддержка сказала ждать. я жду с 2021", "Freshtunes опять лёг. мой трек где-то между Дубаем и моей мамой", "поддержка Freshtunes ответила через 2 месяца. сказала 'ждите'. я жду. до сих пор"
-]
+async def get_ai_reply(chat_id: int, text: str) -> str:
+    if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "sk-":
+        return drunkify_text(generate_absurd())
+        
+    messages = [
+        {"role": "system", "content": "Ты Виталя Бобош, пьяный ебанат в шапке с пропеллером. Отвечай коротко (1-2 предложения), с матом."},
+    ]
+    messages.extend(chat_history[chat_id][-4:])
+    messages.append({"role": "user", "content": text})
+    
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                "https://api.deepseek.com/chat/completions",
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+                json={"model": "deepseek-chat", "messages": messages, "max_tokens": 60, "temperature": 1.5}
+            )
+            data = response.json()
+            reply = data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"⚠️ Ошибка ИИ: {e}")
+        reply = generate_absurd()
+        
+    reply = drunkify_text(reply)
+    chat_history[chat_id].append({"role": "user", "content": text})
+    chat_history[chat_id].append({"role": "assistant", "content": reply})
+    return reply
 
 # ==========================================
-# 5. МЕМЫ (БЕЗ ВИДЕО)
+# БЕЗОПАСНЫЕ МЕМЫ, ДЕМОТИВАТОРЫ И ГИФКИ
 # ==========================================
-def _get_font(size):
-    for path in ("arial.ttf", "DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+def _get_font(size, bold=False):
+    fonts = ("arialbd.ttf", "DejaVuSans-Bold.ttf") if bold else ("arial.ttf", "DejaVuSans.ttf")
+    for path in fonts:
         try: return ImageFont.truetype(path, size)
         except: pass
     return ImageFont.load_default()
 
-def make_meme(image_bytes, top_text, bottom_text):
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    if img.width > 900: img = img.resize((900, int(img.height * (900 / img.width))))
+def draw_meme_text(img, top_text, bottom_text):
+    img = img.convert("RGB")
+    if img.width > 800: img = img.resize((800, int(img.height * (800 / img.width))))
     draw = ImageDraw.Draw(img)
     font = _get_font(40)
     def draw_text(text, x, y, anchor="mt"):
@@ -133,107 +127,166 @@ def make_meme(image_bytes, top_text, bottom_text):
         draw.text((x, y), text, font=font, fill="white", anchor=anchor)
     draw_text(top_text.upper()[:70], img.width // 2, 12, "mt")
     draw_text(bottom_text.upper()[:70], img.width // 2, img.height - 12, "mb")
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=88)
-    out.seek(0)
-    return out.read()
+    return img
+
+def make_meme(image_bytes):
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        top, bottom = generate_absurd(), generate_absurd()
+        img = draw_meme_text(img, top, bottom)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=85)
+        out.seek(0)
+        return out.read()
+    except Exception as e:
+        print(f"Ошибка мема: {e}")
+        return None
+
+def make_demotivator(image_bytes):
+    try:
+        user_img = Image.open(io.BytesIO(image_bytes))
+        top, bottom = generate_absurd(), generate_absurd()
+        border, panel = 40, 120
+        if user_img.width > 800: user_img = user_img.resize((800, int(user_img.height * (800 / user_img.width))))
+        total_w, total_h = user_img.width + (border * 2), user_img.height + border + panel
+        demo = Image.new("RGB", (total_w, total_h), (0, 0, 0))
+        demo.paste(user_img.convert("RGB"), (border, border))
+        draw = ImageDraw.Draw(demo)
+        draw.rectangle([border-2, border-2, border+user_img.width+1, border+user_img.height+1], outline="white", width=2)
+        font_big, font_small = _get_font(45, bold=True), _get_font(30)
+        top_bbox = draw.textbbox((0, 0), top, font=font_big)
+        draw.text(((total_w - (top_bbox[2] - top_bbox[0])) / 2, total_h - panel + 10), top, font=font_big, fill="white")
+        bot_bbox = draw.textbbox((0, 0), bottom, font=font_small)
+        draw.text(((total_w - (bot_bbox[2] - bot_bbox[0])) / 2, total_h - panel + 70), bottom, font=font_small, fill="gray")
+        out = io.BytesIO()
+        demo.save(out, format="JPEG", quality=90)
+        out.seek(0)
+        return out.read()
+    except Exception as e:
+        print(f"Ошибка демотиватора: {e}")
+        return None
+
+def make_gif_from_photo(image_bytes):
+    try:
+        base_img = Image.open(io.BytesIO(image_bytes))
+        top, bottom = generate_absurd(), generate_absurd()
+        base_img = draw_meme_text(base_img, top, bottom)
+        frames = []
+        for i in range(10):
+            offset_x = random.randint(-15, 15)
+            offset_y = random.randint(-15, 15)
+            new_img = Image.new("RGB", base_img.size, (0, 0, 0))
+            new_img.paste(base_img, (offset_x, offset_y))
+            frames.append(new_img)
+        out = io.BytesIO()
+        frames[0].save(out, format="GIF", save_all=True, append_images=frames[1:], duration=100, loop=0)
+        out.seek(0)
+        return out.read()
+    except Exception as e:
+        print(f"Ошибка GIF: {e}")
+        return None
 
 async def _download_file(file_id):
-    file = await bot.get_file(file_id)
-    downloaded = await bot.download_file(file.file_path)
-    return downloaded.read()
-
-def _meme_texts():
-    return random.choice(["сисяндры моисяндры", "У тебя спина красивая", "ААААА", "БЛЯ", "ШАПКА"]), random.choice(["хуйня какая-то", "пропеллер в голову стукнул", "я тупой", "ХАХАХА", "ик"])
+    try:
+        file = await bot.get_file(file_id)
+        downloaded = await bot.download_file(file.file_path)
+        return downloaded.read()
+    except:
+        return None
 
 # ==========================================
-# 6. ХЭНДЛЕРЫ
+# КОМАНДЫ
 # ==========================================
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
-    await msg.answer(
-        f"{EMOJI_HAT} <b>ААААА ПРИВЕТ!!! Я ВИТАЛЯ БОБОШ!!!</b>\n\n"
-        f"Я пьяный. Отвечаю абсурдной хуйнёй. И делаю роллы с эмбер и лизой.\n"
-        f"Напиши: 'отшлепал эмбер' или 'обнял лизу'.\n\n"
-        f"/meme — мем из фото\n"
-        f"/owner — хозяин"
-    )
+    await msg.answer(f"🧢🛸💥 <b>ААААА ПРИВЕТ!!!</b>\nЯ ебанат.\n/meme — мем\n/dem — демотиватор\n/gif — гифка из фото\n/roll [действие] [кто] — ролл")
 
-@dp.message(Command("owner"))
-async def owner_cmd(msg: Message):
-    if msg.from_user.id == OWNER_ID:
-        await msg.answer(f"👑 ХОЗЯИН!!! ДОСТУП ПОДТВЕРЖДЁН!!!\nID: <code>{OWNER_ID}</code>\nВиталя слушается. ик.")
-    else:
-        await msg.answer("❌ ТЫ НЕ ХОЗЯИН ВИТАЛИ. ик.")
+@dp.message(Command("roll"))
+async def roll_cmd(msg: Message, command: CommandObject):
+    if not command.args:
+        return await msg.answer("Напиши действие! Например: /roll отшлепал эмбер.")
+    reply = get_roll_reply(command.args)
+    if reply: await msg.reply(drunkify_text(reply))
+    else: await msg.answer("Виталя не понял, кого ты хочешь.")
 
 @dp.message(Command("meme"))
 async def meme_cmd(msg: Message):
     image_bytes = None
     if msg.reply_to_message and msg.reply_to_message.photo:
-        try: image_bytes = await _download_file(msg.reply_to_message.photo[-1].file_id)
-        except: pass
+        image_bytes = await _download_file(msg.reply_to_message.photo[-1].file_id)
     elif msg.photo:
-        try: image_bytes = await _download_file(msg.photo[-1].file_id)
-        except: pass
-    if not image_bytes and media_history[msg.chat.id]:
-        try: image_bytes = await _download_file(random.choice(media_history[msg.chat.id]))
-        except: pass
-    
+        image_bytes = await _download_file(msg.photo[-1].file_id)
     if not image_bytes:
-        await msg.answer("Виталя не видит фото. ответь на фото или приложи. ик.")
-        return
-    try:
-        top, bottom = _meme_texts()
-        meme = make_meme(image_bytes, top, bottom)
-        await msg.reply_photo(BufferedInputFile(meme, filename="meme.jpg"), caption=drunkify_text("Виталя сделал мем. ХАХА"))
-    except Exception as e:
-        await msg.answer(f"Виталя сломал мем: {str(e)[:100]}.")
+        return await msg.answer("Виталя не видит фото. ик.")
+    meme = make_meme(image_bytes)
+    if meme: await msg.reply_photo(BufferedInputFile(meme, filename="meme.jpg"), caption="Мем. ХАХА")
+    else: await msg.answer("Виталя сломал мем.")
 
+@dp.message(Command("dem"))
+async def dem_cmd(msg: Message):
+    image_bytes = None
+    if msg.reply_to_message and msg.reply_to_message.photo:
+        image_bytes = await _download_file(msg.reply_to_message.photo[-1].file_id)
+    elif msg.photo:
+        image_bytes = await _download_file(msg.photo[-1].file_id)
+    if not image_bytes:
+        return await msg.answer("Виталя не видит фото. ик.")
+    dem = make_demotivator(image_bytes)
+    if dem: await msg.reply_photo(BufferedInputFile(dem, filename="dem.jpg"), caption="Демотиватор. ХАХА")
+    else: await msg.answer("Виталя сломал демотиватор.")
+
+@dp.message(Command("gif"))
+async def gif_cmd(msg: Message):
+    image_bytes = None
+    if msg.reply_to_message and msg.reply_to_message.photo:
+        image_bytes = await _download_file(msg.reply_to_message.photo[-1].file_id)
+    elif msg.photo:
+        image_bytes = await _download_file(msg.photo[-1].file_id)
+    if not image_bytes:
+        return await msg.answer("Виталя не видит фото для гифки. ик.")
+    await msg.answer("Виталя трясет гифку... АААА...")
+    gif_bytes = make_gif_from_photo(image_bytes)
+    if gif_bytes:
+        await msg.reply_animation(BufferedInputFile(gif_bytes, filename="vitalya.gif"), caption="Гифка. ХАХА")
+    else:
+        await msg.answer("Виталя сломал гифку.")
+
+# ==========================================
+# ГЛАВНЫЙ ОБРАБОТЧИК
+# ==========================================
 @dp.message(F.photo)
 async def catch_photo(msg: Message):
-    try: media_history[msg.chat.id].append(msg.photo[-1].file_id)
-    except: pass
-    await msg.reply(drunkify_text(random.choice(["ОЙ. ФОТО. Виталя запомнил. мем: /meme", "картинка. красиво. сисяндры моисяндры"])))
+    pass
 
 @dp.message(F.text)
 async def handler(msg: Message):
     if msg.from_user.is_bot: return
+    if not chat_settings[msg.chat.id]["active"]: return
     text = msg.text.strip()
     if not text or text.startswith("/"): return
     
-    counter[msg.chat.id] += 1
-    await asyncio.sleep(random.uniform(0.5, 2.5))
+    roll_reply = get_roll_reply(text)
+    if roll_reply:
+        return await msg.reply(drunkify_text(roll_reply))
 
-    roll = roll_action(text)
-    if roll:
-        await msg.reply(drunkify_text(roll))
+    if not is_mentioned(text, msg):
         return
 
-    if random.random() < 0.6:
-        reply = generate_absurd()
-    else:
-        reply = random.choice(SPECIAL_PHRASES)
-        
-    await msg.reply(drunkify_text(reply))
+    await bot.send_chat_action(msg.chat.id, "typing")
+    await asyncio.sleep(random.uniform(0.5, 2.0))
+    
+    try:
+        reply = await get_ai_reply(msg.chat.id, text)
+        await msg.reply(reply)
+    except TelegramBadRequest:
+        pass
+    except Exception as e:
+        print(f"Ошибка отправки: {e}")
 
-# ==========================================
-# 7. ЗАПУСК (FLASK + BOT)
-# ==========================================
 async def main():
-    print(f"🤖 {NAME} (ГЕНЕРАТОР БРЕДА + РОЛЛЫ) запускается...")
+    print("🤖 Виталя запускается (Background Worker)...")
     await dp.start_polling(bot)
 
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is running"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
 if __name__ == "__main__":
-    # Запускаем Flask в фоне (для Render), а бота — в главном потоке
-    threading.Thread(target=run_flask, daemon=True).start()
     asyncio.run(main())
+        
